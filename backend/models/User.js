@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 
+// Define user schema
 const userSchema = new mongoose.Schema(
   {
     name: {
@@ -18,6 +19,7 @@ const userSchema = new mongoose.Schema(
     passwordHash: {
       type: String,
       required: true,
+      select: false, // ✅ important so password isn't exposed by default
     },
     role: {
       type: String,
@@ -31,24 +33,38 @@ const userSchema = new mongoose.Schema(
     },
     salary: {
       amount: { type: Number, default: 0 },
-      status: { type: String, enum: ["paid", "pending"], default: "pending" },
+      status: {
+        type: String,
+        enum: ["paid", "pending"],
+        default: "pending",
+      },
       nextPaymentDate: { type: Date },
     },
   },
   { timestamps: true }
 );
 
-// Hash password before saving the user model
+// ✅ Hash password before saving
 userSchema.pre("save", async function (next) {
   if (this.isModified("passwordHash")) {
-    this.passwordHash = await bcrypt.hash(this.passwordHash, 12);
+    const salt = await bcrypt.genSalt(10);
+    this.passwordHash = await bcrypt.hash(this.passwordHash, salt);
   }
   next();
 });
 
-// Method to compare entered password with the hashed password
+// ✅ Compare entered password with the hashed password
 userSchema.methods.comparePassword = async function (enteredPassword) {
-  return await bcrypt.compare(enteredPassword, this.passwordHash);
+  return bcrypt.compare(enteredPassword, this.passwordHash);
 };
 
-export default mongoose.models.User || mongoose.model("User", userSchema);
+// ✅ Safely return public profile data
+userSchema.methods.toJSON = function () {
+  const obj = this.toObject();
+  delete obj.passwordHash; // Never send hash back
+  return obj;
+};
+
+// ✅ Export model
+const User = mongoose.models.User || mongoose.model("User", userSchema);
+export default User;

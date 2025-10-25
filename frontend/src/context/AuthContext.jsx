@@ -1,11 +1,10 @@
-import React, {
-  createContext,
-  useState,
-  useEffect,
-  useCallback,
-  useMemo,
-} from "react";
+// src/contexts/AuthContext.jsx
+// 📍 LOCATION: src/contexts/AuthContext.jsx (frontend)
+// 📍 ACTION: REPLACE your existing src/contexts/AuthContext.jsx with this
+
+import React, { createContext, useState, useEffect, useCallback, useMemo } from "react";
 import { jwtDecode } from "jwt-decode";
+
 import { setAuthToken } from "../services/api.js";
 import authService from "../services/authService.js";
 import shopService from "../services/shopService.js";
@@ -22,20 +21,30 @@ export const AuthProvider = ({ children }) => {
     try {
       const decodedUser = jwtDecode(authToken);
       const currentTime = Date.now() / 1000;
-      if (decodedUser.exp > currentTime) {
+
+      if (decodedUser.exp && decodedUser.exp > currentTime) {
         setAuthToken(authToken);
         setUser(decodedUser);
+
         if (decodedUser.shopId) {
-          const details = await shopService.getShopDetails(decodedUser.shopId);
-          setShopDetails(details);
+          try {
+            const details = await shopService.getShopDetails(decodedUser.shopId);
+            setShopDetails(details);
+          } catch (error) {
+            console.error("[AUTH] Failed to load shop details:", error);
+          }
         }
       } else {
+        console.log("[AUTH] Token expired");
         localStorage.removeItem("token");
         setToken(null);
+        setUser(null);
       }
     } catch (error) {
+      console.error("[AUTH] Failed to decode token:", error);
       localStorage.removeItem("token");
       setToken(null);
+      setUser(null);
     } finally {
       setLoading(false);
     }
@@ -53,6 +62,7 @@ export const AuthProvider = ({ children }) => {
     const { token: newToken } = await authService.login(email, password);
     localStorage.setItem("token", newToken);
     setToken(newToken);
+    await loadDataFromToken(newToken);
   };
 
   const logout = () => {

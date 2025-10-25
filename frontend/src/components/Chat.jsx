@@ -18,17 +18,30 @@ function Chat({ jwtToken }) {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${jwtToken}`,
+          "Authorization": `Bearer ${jwtToken}`, // must be valid!
         },
-        body: JSON.stringify({ query: userMessage.text })
+        body: JSON.stringify({ query: userMessage.text, topK: 5 })
       });
+
+      if (!resp.ok) {
+        const errorText = await resp.text();
+        console.error("RAG server error:", resp.status, errorText);
+        setMessages(prev => [
+          ...prev,
+          { role: "assistant", text: `⚠️ Server error ${resp.status}: ${errorText}` }
+        ]);
+        return;
+      }
 
       const data = await resp.json();
       const aiMessage = { role: "assistant", text: data.answer || "No answer received." };
       setMessages(prev => [...prev, aiMessage]);
     } catch (err) {
       console.error("Chat error:", err);
-      setMessages(prev => [...prev, { role: "assistant", text: "⚠️ Error talking to AI." }]);
+      setMessages(prev => [
+        ...prev,
+        { role: "assistant", text: "⚠️ Error talking to AI. Check if Python RAG server is running." }
+      ]);
     } finally {
       setLoading(false);
     }
@@ -38,7 +51,14 @@ function Chat({ jwtToken }) {
     <div className="flex flex-col border rounded-lg p-3 h-96">
       <div className="flex-1 overflow-y-auto space-y-2">
         {messages.map((msg, i) => (
-          <div key={i} className={`p-2 rounded-lg max-w-xs ${msg.role === "user" ? "ml-auto bg-indigo-100 text-indigo-900" : "mr-auto bg-gray-100 text-gray-800"}`}>
+          <div
+            key={i}
+            className={`p-2 rounded-lg max-w-xs ${
+              msg.role === "user"
+                ? "ml-auto bg-indigo-100 text-indigo-900"
+                : "mr-auto bg-gray-100 text-gray-800"
+            }`}
+          >
             {msg.text}
           </div>
         ))}
@@ -52,7 +72,9 @@ function Chat({ jwtToken }) {
           placeholder="Ask something..."
           className="flex-1 border rounded-l-lg p-2"
         />
-        <button onClick={sendMessage} className="bg-indigo-600 text-white px-4 rounded-r-lg">Send</button>
+        <button onClick={sendMessage} className="bg-indigo-600 text-white px-4 rounded-r-lg">
+          Send
+        </button>
       </div>
     </div>
   );

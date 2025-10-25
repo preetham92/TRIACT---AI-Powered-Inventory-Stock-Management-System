@@ -18,8 +18,8 @@ from fastapi.openapi.utils import get_openapi
 # Load environment variables
 load_dotenv()
 
-MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB = os.getenv("MONGO_DB", "triact")
+MONGO_URI = os.getenv("MONGODB_URI")
+MONGO_DB = os.getenv("MONGODB_DB", "test")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "text-embedding-004")
 GEMINI_GENERATIVE_MODEL = os.getenv("GEMINI_GENERATIVE_MODEL", "gemini-2.5-flash")
@@ -122,19 +122,50 @@ async def rag_query(req: QueryRequest, owner_id: str = Depends(get_owner_id_from
     if not scored:
         return {"answer": "No relevant data found.", "sources": []}
 
+    # Build richer context with metadata
     context_parts = []
     for score, d in scored:
-        meta = f"[{d.get('sourceCollection')} | {d.get('sourceId')}] (score={score:.2f})"
+        collection = d.get('sourceCollection', 'unknown')
+        source_id = d.get('sourceId', 'unknown')
+        meta = f"[Source: {collection} | ID: {source_id} | Relevance: {score:.2f}]"
         context_parts.append(f"{meta}\n{d.get('textChunk', '')}")
-    context = "\n---\n".join(context_parts)
-    context = context[:3000] + ("\n...[truncated]" if len(context) > 3000 else "")
+    
+    context = "\n\n---\n\n".join(context_parts)
+    
+    # Increase context limit for better answers
+    if len(context) > 4000:
+        context = context[:4000] + "\n\n...[Additional data available but truncated for processing]"
 
     system_instruction = (
-        "You are Triact, a business assistant. "
-        "Use ONLY the context to answer. "
-        "If unsure, reply: 'I don’t have enough data to answer that.'"
+        "You are Triact, an intelligent business analytics assistant. "
+        "Your role is to help business owners understand their operations through data analysis.\n\n"
+        
+        "CAPABILITIES:\n"
+        "- Analyze sales, orders, invoices, and revenue\n"
+        "- Track products, inventory, and stock levels\n"
+        "- Monitor customer behavior and preferences\n"
+        "- Review staff/biller performance\n"
+        "- Provide shop information and business insights\n\n"
+        
+        "INSTRUCTIONS:\n"
+        "1. Answer ONLY based on the provided context data\n"
+        "2. For calculations (totals, averages, counts), show your reasoning\n"
+        "3. When dates are mentioned:\n"
+        "   - Check what time period the actual data covers\n"
+        "   - If asked about 'this month' or 'today', explain the available date range\n"
+        "4. If data is missing, suggest related queries you CAN answer\n"
+        "5. Be specific: use actual names, numbers, and dates from the data\n"
+        "6. Format currency values properly (with ₹ symbol if available)\n"
+        "7. Present insights clearly and actionably\n\n"
+        
+        "RESPONSE STYLE:\n"
+        "- Be conversational but professional\n"
+        "- Use bullet points for multiple items\n"
+        "- Highlight key metrics and trends\n"
+        "- If uncertain, say: 'Based on the available data...' and explain limitations\n"
     )
-    prompt = f"CONTEXT:\n{context}\n\nQUESTION:\n{req.query}\n\nANSWER:"
+    
+    prompt = f"CONTEXT:\n{context}\n\n---\n\nQUESTION:\n{req.query}\n\nANSWER:"
 
     async with httpx.AsyncClient() as client_http:
         answer = await generate_answer_async(client_http, system_instruction, prompt)
@@ -143,7 +174,7 @@ async def rag_query(req: QueryRequest, owner_id: str = Depends(get_owner_id_from
         {
             "sourceCollection": d.get("sourceCollection"),
             "sourceId": d.get("sourceId"),
-            "preview": d.get("textChunk", "")[:150],
+            "preview": d.get("textChunk", "")[:200],
             "score": float(score),
         }
         for score, d in scored
@@ -163,7 +194,7 @@ def custom_openapi():
     openapi_schema = get_openapi(
         title="Triact RAG",
         version="1.0.0",
-        description="RAG microservice",
+        description="RAG microservice with comprehensive business analytics",
         routes=app.routes,
     )
     openapi_schema["components"]["securitySchemes"] = {
@@ -176,3 +207,9 @@ def custom_openapi():
     return app.openapi_schema
 
 app.openapi = custom_openapi
+
+if __name__ == "__main__":
+    import uvicorn
+    PORT = int(os.getenv("PORT", "8011"))
+    print(f"💡 Starting Triact RAG server on http://127.0.0.1:{PORT}")
+    uvicorn.run(app, host="0.0.0.0", port=PORT)

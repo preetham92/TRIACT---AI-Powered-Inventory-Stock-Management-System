@@ -1,6 +1,6 @@
 """
 Async ingestion script for Triact.
-- Reads invoices, sales, stock from MongoDB
+- Reads all business collections from MongoDB
 - Chunks documents intelligently (with overlap)
 - Batches embeddings to Gemini text-embedding-004 (async httpx)
 - Upserts into `embeddings` collection keyed by (ownerId, sourceCollection, sourceId, chunkHash)
@@ -21,13 +21,13 @@ from tenacity import retry, wait_exponential, stop_after_attempt
 
 load_dotenv()
 
-MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB = os.getenv("MONGO_DB", "triact")
+MONGO_URI = os.getenv("MONGODB_URI")
+MONGO_DB = os.getenv("MONGODB_DB", "test")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "text-embedding-004")
 BATCH_SIZE = int(os.getenv("EMBED_BATCH_SIZE", "8"))
 
-# 🆕 Triact server URL (for cache refresh)
+# Triact server URL (for cache refresh)
 TRIACT_API_URL = os.getenv("TRIACT_API_URL", "http://localhost:8011")
 
 if not MONGO_URI or not GEMINI_API_KEY:
@@ -44,7 +44,7 @@ emb_col.create_index([("sourceCollection", ASCENDING)])
 emb_col.create_index([("createdAt", ASCENDING)])
 
 # Chunking utils
-def chunk_text(text: str, max_chars: int = 1600, overlap: int = 200) -> List[str]:
+def chunk_text(text: str, max_chars: int = 2000, overlap: int = 300) -> List[str]:
     text = text.strip()
     if not text:
         return []
@@ -73,7 +73,7 @@ def stable_chunk_id(owner_id: str, source_collection: str, source_id: str, chunk
     h.update(chunk_text.encode("utf-8"))
     return h.hexdigest()
 
-# Gemini embed call (async)
+# Gemini embed call (async) - Fixed for single embedding response
 @retry(wait=wait_exponential(min=1, max=10), stop=stop_after_attempt(4))
 async def call_gemini_embed(client_http: httpx.AsyncClient, texts: List[str]) -> List[List[float]]:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_EMBEDDING_MODEL}:embedContent"
@@ -85,11 +85,16 @@ async def call_gemini_embed(client_http: httpx.AsyncClient, texts: List[str]) ->
     resp = await client_http.post(url, json=payload, headers=headers, timeout=60.0)
     resp.raise_for_status()
     data = resp.json()
-    if "embeddings" not in data:
+    
+    # Handle both response formats
+    if "embedding" in data:
+        return [data["embedding"]["values"]]
+    elif "embeddings" in data:
+        return [e.get("values") for e in data["embeddings"]]
+    else:
         raise RuntimeError(f"Unexpected embedding response: {data}")
-    return [e.get("values") for e in data["embeddings"]]
 
-# 🆕 Refresh FAISS cache for specific owner
+# Refresh FAISS cache for specific owner
 async def refresh_owner_cache(owner_id: str):
     async with httpx.AsyncClient() as client:
         try:
@@ -106,52 +111,64 @@ async def ingest_collection(col_name: str):
     col = db[col_name]
     async with httpx.AsyncClient() as client_http:
         cursor = col.find({})
-        owners_refreshed = set()  # 🆕 to avoid multiple refreshes per owner
+        owners_refreshed = set()
 
         for doc in cursor:
             owner_id = doc.get("ownerId") or doc.get("owner") or doc.get("shopId") or doc.get("tenantId")
             if not owner_id:
                 continue
 
-            # Flatten document
-            parts = [f"_source_collection_: {col_name}"]
+            # Create a rich, contextual representation
+            parts = [
+                f"=== {col_name.upper()} RECORD ===",
+                f"Collection: {col_name}",
+                f"Document ID: {doc.get('_id')}"
+            ]
+            
+            # Add all fields with better formatting
             for k, v in doc.items():
-                if k == "_id":
+                if k in ["_id", "__v"]:  # Skip technical fields
                     continue
                 try:
                     if isinstance(v, (dict, list)):
-                        parts.append(f"{k}: {json.dumps(v, default=str)}")
+                        # Pretty print nested data
+                        parts.append(f"{k}: {json.dumps(v, indent=2, default=str)}")
+                    elif k in ["date", "createdAt", "updatedAt"]:
+                        # Make dates readable
+                        parts.append(f"{k}: {v}")
                     else:
                         parts.append(f"{k}: {v}")
                 except Exception:
                     parts.append(f"{k}: (unserializable)")
 
             text = "\n".join(parts)
-            chunks = chunk_text(text, max_chars=1600, overlap=200)
+            
+            # Chunk with more context (larger chunks for better understanding)
+            chunks = chunk_text(text, max_chars=2000, overlap=300)
             if not chunks:
                 continue
 
-            for i in range(0, len(chunks), BATCH_SIZE):
-                batch = chunks[i:i+BATCH_SIZE]
-                embeddings = await call_gemini_embed(client_http, batch)
-                for c_text, emb in zip(batch, embeddings):
-                    chunk_id = stable_chunk_id(str(owner_id), col_name, str(doc["_id"]), c_text)
-                    emb_col.update_one(
-                        {"chunkId": chunk_id},
-                        {"$set": {
-                            "ownerId": str(owner_id),
-                            "chunkId": chunk_id,
-                            "textChunk": c_text,
-                            "embeddingVector": emb,
-                            "sourceCollection": col_name,
-                            "sourceId": str(doc["_id"]),
-                            "fields": {k: doc.get(k) for k in doc.keys() if k != "_id"},
-                            "createdAt": datetime.utcnow(),
-                        }},
-                        upsert=True
-                    )
+            # Process one chunk at a time (Gemini returns single embedding)
+            for c_text in chunks:
+                embeddings = await call_gemini_embed(client_http, [c_text])
+                emb = embeddings[0]
+                chunk_id = stable_chunk_id(str(owner_id), col_name, str(doc["_id"]), c_text)
+                emb_col.update_one(
+                    {"chunkId": chunk_id},
+                    {"$set": {
+                        "ownerId": str(owner_id),
+                        "chunkId": chunk_id,
+                        "textChunk": c_text,
+                        "embeddingVector": emb,
+                        "sourceCollection": col_name,
+                        "sourceId": str(doc["_id"]),
+                        "fields": {k: doc.get(k) for k in doc.keys() if k not in ["_id", "__v"]},
+                        "createdAt": datetime.utcnow(),
+                    }},
+                    upsert=True
+                )
 
-            # 🆕 Refresh cache for that owner once per ingestion run
+            # Refresh cache for that owner once per ingestion run
             if owner_id not in owners_refreshed:
                 await refresh_owner_cache(owner_id)
                 owners_refreshed.add(owner_id)
@@ -159,10 +176,24 @@ async def ingest_collection(col_name: str):
             print(f"✅ Ingested doc {doc.get('_id')} from {col_name} (owner={owner_id})")
 
 async def main():
-    for c in ["invoices", "sales", "stock"]:
-        print(f"Starting ingest for {c}")
-        await ingest_collection(c)
-    print("Ingestion complete ✅")
+    # Core business data - ingest all collections
+    collections_to_ingest = [
+        "invoices",      # Invoice records
+        "orders",        # Order transactions
+        "products",      # Product catalog
+        "shops",         # Shop information
+        "users",         # User/staff data
+        "notifications", # Business notifications
+    ]
+    
+    for c in collections_to_ingest:
+        try:
+            print(f"\n🔄 Starting ingest for {c}...")
+            await ingest_collection(c)
+        except Exception as e:
+            print(f"⚠️ Error ingesting {c}: {e}")
+    
+    print("\n✅ Ingestion complete!")
 
 if __name__ == "__main__":
     asyncio.run(main())
