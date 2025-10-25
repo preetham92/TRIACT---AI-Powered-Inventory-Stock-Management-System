@@ -1,0 +1,36 @@
+# This is your master gitignore file for the whole project.
+
+# Dependencies
+# These are installed by running `npm install`, so we don't need to track them.
+/node_modules
+/frontend/node_modules
+/backend/node_modules
+
+# Build Output & Cache
+# These are generated automatically when you run the app or build it for production.
+/frontend/dist
+/backend/.next
+
+# Environment Variables
+# This is the MOST IMPORTANT rule. It ignores your secret keys.
+# The ! makes an exception, so the example file IS included.
+*.env
+*.env.local
+!.env.example
+
+# Generated Content
+# We don't want to commit the PDFs created during testing.
+/backend/public/invoices/*.pdf
+
+# macOS / Windows specific files
+.DS_Store
+Thumbs.db
+
+# Editor directories and files
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
